@@ -55,7 +55,20 @@ async function sendVerifyEmail(email, link) {
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || "*" }));
+const ALLOWED_ORIGINS = [
+  "https://tayf.art",
+  "https://www.tayf.art",
+  "https://tayf-kohl.vercel.app",
+];
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+}));
 
 // ---- خرائط النماذج على fal.ai (راجع صفحة كل نموذج للمعاملات الدقيقة) ----
 const VIDEO_ENDPOINTS = {
