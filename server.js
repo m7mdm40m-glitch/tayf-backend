@@ -205,6 +205,46 @@ app.post("/api/generate", auth, async (req, res) => {
   }
 });
 
+// تنزيل آمن للملفات الناتجة (صور/فيديو) عبر الخادم — يضمن "الحفظ" بدل مجرّد الفتح،
+// ويسمح فقط بجلب الملفات من نطاقات fal الموثوقة (حماية من إساءة الاستخدام).
+app.get("/api/download", async (req, res) => {
+  try {
+    const fileUrl = String(req.query.url || "");
+    const rawName = String(req.query.name || "tayf");
+    const safeName = rawName.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 60) || "tayf";
+    if (!fileUrl) return res.status(400).send("NO_URL");
+
+    let u;
+    try { u = new URL(fileUrl); } catch { return res.status(400).send("BAD_URL"); }
+    const host = u.hostname.toLowerCase();
+    const allowedHost =
+      host === "fal.media" || host.endsWith(".fal.media") ||
+      host === "fal.run" || host.endsWith(".fal.run") ||
+      host.endsWith(".fal.ai") ||
+      host.endsWith(".storage.googleapis.com");
+    if (u.protocol !== "https:" || !allowedHost) return res.status(403).send("FORBIDDEN_HOST");
+
+    const upstream = await fetch(fileUrl);
+    if (!upstream.ok) return res.status(502).send("FETCH_FAILED");
+
+    const ct = upstream.headers.get("content-type") || "application/octet-stream";
+    const ext =
+      ct.includes("mp4") || ct.includes("video") ? "mp4" :
+      ct.includes("png") ? "png" :
+      ct.includes("webp") ? "webp" :
+      ct.includes("jpeg") || ct.includes("jpg") ? "jpg" : "";
+    const filename = ext ? `${safeName}.${ext}` : safeName;
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", buf.length);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send("DOWNLOAD_ERROR");
+  }
+});
+
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => console.log(`طيف backend on http://localhost:${PORT}`));
