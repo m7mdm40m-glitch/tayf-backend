@@ -17,7 +17,6 @@ const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 fal.config({ credentials: process.env.FAL_KEY });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ---- حظر خدمات البريد المؤقت ----
 const DISPOSABLE = new Set([
   "tempmail.com", "temp-mail.org", "10minutemail.com", "guerrillamail.com",
   "mailinator.com", "yopmail.com", "throwawaymail.com", "getnada.com",
@@ -29,7 +28,6 @@ function isDisposable(email) {
   return DISPOSABLE.has(domain);
 }
 
-// ---- إرسال بريد التأكيد (يستخدم SMTP إن وُجد، وإلا يطبع الرابط للتطوير) ----
 let mailer = null;
 if (process.env.SMTP_HOST) {
   mailer = nodemailer.createTransport({
@@ -70,7 +68,6 @@ app.use(cors({
   },
 }));
 
-// ---- خرائط النماذج على fal.ai (راجع صفحة كل نموذج للمعاملات الدقيقة) ----
 const VIDEO_ENDPOINTS = {
   "kling26": "fal-ai/kling-video/v2.6/pro/text-to-video",
   "veo3.1": "fal-ai/veo3.1/text-to-video",
@@ -79,10 +76,8 @@ const VIDEO_ENDPOINTS = {
 };
 const IMAGE_ENDPOINT = "fal-ai/flux/dev";
 
-// نموذج التجربة المجانية (الأرخص) — غير المشتركين مقيّدون به
 const FREE_MODEL = "kling26";
 
-// نِسب الأبعاد إلى مقاسات الصور
 const IMAGE_SIZE = {
   "9:16": "portrait_16_9",
   "1:1": "square_hd",
@@ -90,20 +85,19 @@ const IMAGE_SIZE = {
   "4:5": "portrait_4_3",
 };
 
-// ---- أدوات المصادقة ----
 function sign(user) {
   return jwt.sign({ email: user.email, name: user.name }, JWT_SECRET, { expiresIn: "30d" });
 }
 function publicUser(u) {
   return { name: u.name, email: u.email, credits: u.credits };
 }
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const h = req.headers.authorization || "";
   const token = h.startsWith("Bearer ") ? h.slice(7) : null;
   if (!token) return res.status(401).json({ error: "NO_TOKEN" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const u = getUser(payload.email);
+    const u = await getUser(payload.email);
     if (!u) return res.status(401).json({ error: "NO_USER" });
     req.user = u;
     next();
@@ -112,19 +106,17 @@ function auth(req, res, next) {
   }
 }
 
-// ---- إنشاء حساب: يرفض البريد المؤقت ويتطلب تأكيداً قبل منح الرصيد ----
 app.post("/api/signup", async (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: "MISSING_FIELDS" });
   const key = String(email).trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(key)) return res.status(400).json({ error: "INVALID_EMAIL" });
   if (isDisposable(key)) return res.status(400).json({ error: "DISPOSABLE_EMAIL" });
-  if (getUser(key)) return res.status(409).json({ error: "EMAIL_EXISTS" });
+  if (await getUser(key)) return res.status(409).json({ error: "EMAIL_EXISTS" });
 
   const passHash = await bcrypt.hash(password, 10);
   const verifyToken = crypto.randomBytes(24).toString("hex");
-  // الحساب يبدأ غير مفعّل وبرصيد صفر — الرصيد المجاني يُمنح بعد التأكيد فقط
-  createUser({ name: name.trim(), email: key, passHash, credits: 0, verified: false, verifyToken });
+  await createUser({ name: name.trim(), email: key, passHash, credits: 0, verified: false, verifyToken });
 
   const link = `${APP_URL}/api/verify?token=${verifyToken}`;
   try { await sendVerifyEmail(key, link); } catch (e) { console.error("mail error", e?.message); }
@@ -132,32 +124,28 @@ app.post("/api/signup", async (req, res) => {
   res.json({ pending: true, message: "VERIFY_EMAIL_SENT" });
 });
 
-// ---- تأكيد البريد: يفعّل الحساب ويمنح الرصيد المجاني مرة واحدة ----
-app.get("/api/verify", (req, res) => {
+app.get("/api/verify", async (req, res) => {
   const token = req.query.token;
   if (!token) return res.status(400).send("رابط غير صالح");
-  const u = getUserByVerifyToken(String(token));
+  const u = await getUserByVerifyToken(String(token));
   if (!u) return res.status(400).send("رابط منتهٍ أو غير صالح");
   if (u.verified) return res.send("تم تأكيد بريدك مسبقاً. يمكنك تسجيل الدخول.");
-  updateUser(u.email, { verified: true, verifyToken: null, credits: FREE_CREDITS });
+  await updateUser(u.email, { verified: true, verifyToken: null, credits: FREE_CREDITS });
   res.send("تم تأكيد بريدك بنجاح ✓ — حصلت على تجربتك المجانية. يمكنك الآن تسجيل الدخول.");
 });
 
-// ---- تسجيل الدخول ----
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "MISSING_FIELDS" });
-  const u = getUser(String(email).trim().toLowerCase());
+  const u = await getUser(String(email).trim().toLowerCase());
   if (!u || !(await bcrypt.compare(password, u.passHash)))
     return res.status(401).json({ error: "BAD_CREDENTIALS" });
   if (!u.verified) return res.status(403).json({ error: "EMAIL_NOT_VERIFIED" });
   res.json({ token: sign(u), user: publicUser(u) });
 });
 
-// ---- بيانات المستخدم الحالي (الرصيد) ----
 app.get("/api/me", auth, (req, res) => res.json({ user: publicUser(req.user) }));
 
-// ---- تحسين الوصف بالذكاء الاصطناعي (يفهم أي لغة) ----
 app.post("/api/enhance", async (req, res) => {
   const { prompt, mode = "image", styleEn = "" } = req.body || {};
   if (!prompt) return res.status(400).json({ error: "NO_PROMPT" });
@@ -180,14 +168,12 @@ app.post("/api/enhance", async (req, res) => {
   }
 });
 
-// ---- التوليد الفعلي: يحسب التكلفة، يخصم الرصيد، يستدعي fal.ai ----
 app.post("/api/generate", auth, async (req, res) => {
   const { mode = "image", model = "veo3.1", prompt, ratio = "9:16", duration = 5, count = 1 } = req.body || {};
   if (!prompt) return res.status(400).json({ error: "NO_PROMPT" });
 
   const n = Math.max(1, Math.min(mode === "video" ? 2 : 4, Number(count)));
   const dur = Math.max(3, Math.min(15, Number(duration)));
-  // التكلفة: كل ثانية فيديو = عملة، كل صورة = عملة
   const cost = mode === "video" ? n * dur : n;
 
   if ((req.user.credits ?? 0) < cost)
@@ -196,10 +182,8 @@ app.post("/api/generate", auth, async (req, res) => {
   try {
     let outputs = [];
     if (mode === "video") {
-      // غير المشتركين مقيّدون بالنموذج الأرخص
       const useModel = req.user.subscribed ? model : FREE_MODEL;
       const endpoint = VIDEO_ENDPOINTS[useModel] || VIDEO_ENDPOINTS[FREE_MODEL];
-      // ملاحظة: أسماء معاملات الإدخال تختلف بين النماذج — راجع صفحة النموذج على fal.ai
       const r = await fal.subscribe(endpoint, {
         input: { prompt, aspect_ratio: ratio, duration: dur },
       });
@@ -214,8 +198,7 @@ app.post("/api/generate", auth, async (req, res) => {
 
     if (!outputs.length) return res.status(502).json({ error: "NO_OUTPUT" });
 
-    // الخصم بعد نجاح التوليد فقط
-    const creditsLeft = addCredits(req.user.email, -cost);
+    const creditsLeft = await addCredits(req.user.email, -cost);
     res.json({ outputs, cost, creditsLeft });
   } catch (e) {
     res.status(502).json({ error: "GENERATION_FAILED", detail: String(e?.message || e) });
