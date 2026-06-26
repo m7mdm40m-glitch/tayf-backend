@@ -1,62 +1,100 @@
-// مخزن بسيط بملف JSON — للبداية فقط.
-// في الإنتاج استبدله بقاعدة بيانات حقيقية (Postgres / Supabase) مع معاملات آمنة.
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
+// مخزن البيانات باستخدام PostgreSQL (دائم — لا يُمسح مع إعادة النشر).
+import pg from "pg";
 
-const DB_PATH = "./data/db.json";
+const { Pool } = pg;
 
-function load() {
-  if (!existsSync(DB_PATH)) return { users: {} };
-  try { return JSON.parse(readFileSync(DB_PATH, "utf8")); }
-  catch { return { users: {} }; }
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false },
+});
+
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      email TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      pass_hash TEXT NOT NULL,
+      credits INTEGER NOT NULL DEFAULT 0,
+      verified BOOLEAN NOT NULL DEFAULT false,
+      verify_token TEXT,
+      subscribed BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+await ensureSchema();
+
+function rowToUser(row) {
+  if (!row) return null;
+  return {
+    email: row.email,
+    name: row.name,
+    passHash: row.pass_hash,
+    credits: row.credits,
+    verified: row.verified,
+    verifyToken: row.verify_token,
+    subscribed: row.subscribed,
+  };
 }
 
-function save(db) {
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-  writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+export async function getUser(email) {
+  const r = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+  return rowToUser(r.rows[0]);
 }
 
-export function getUser(email) {
-  return load().users[email] || null;
+export async function getUserByVerifyToken(token) {
+  const r = await pool.query("SELECT * FROM users WHERE verify_token = $1", [token]);
+  return rowToUser(r.rows[0]);
 }
 
-export function getUserByVerifyToken(token) {
-  const db = load();
-  return Object.values(db.users).find((u) => u.verifyToken === token) || null;
-}
-
-export function updateUser(email, patch) {
-  const db = load();
-  const u = db.users[email];
-  if (!u) return null;
-  Object.assign(u, patch);
-  save(db);
-  return u;
-}
-
-export function createUser(user) {
-  const db = load();
-  db.users[user.email] = user;
-  save(db);
+export async function createUser(user) {
+  await pool.query(
+    `INSERT INTO users (email, name, pass_hash, credits, verified, verify_token)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [user.email, user.name, user.passHash, user.credits ?? 0, user.verified ?? false, user.verifyToken ?? null]
+  );
   return user;
 }
 
-// تعديل الرصيد بشكل آمن نسبياً (read-modify-write).
-// ملاحظة: مع تزامن عالٍ استخدم قاعدة بيانات تدعم المعاملات الذرّية.
-export function addCredits(email, delta) {
-  const db = load();
-  const u = db.users[email];
-  if (!u) return null;
-  u.credits = Math.max(0, (u.credits ?? 0) + delta);
-  save(db);
-  return u.credits;
+export async function updateUser(email, patch) {
+  const fields = [];
+  const values = [];
+  let i = 1;
+  const map = {
+    name: "name",
+    passHash: "pass_hash",
+    credits: "credits",
+    verified: "verified",
+    verifyToken: "verify_token",
+    subscribed: "subscribed",
+  };
+  for (const key of Object.keys(patch)) {
+    if (map[key]) {
+      fields.push(`${map[key]} = $${i++}`);
+      values.push(patch[key]);
+    }
+  }
+  if (!fields.length) return await getUser(email);
+  values.push(email);
+  const r = await pool.query(
+    `UPDATE users SET ${fields.join(", ")} WHERE email = $${i} RETURNING *`,
+    values
+  );
+  return rowToUser(r.rows[0]);
 }
 
-export function setCredits(email, value) {
-  const db = load();
-  const u = db.users[email];
-  if (!u) return null;
-  u.credits = Math.max(0, value);
-  save(db);
-  return u.credits;
+export async function addCredits(email, delta) {
+  const r = await pool.query(
+    `UPDATE users SET credits = GREATEST(0, credits + $1) WHERE email = $2 RETURNING credits`,
+    [delta, email]
+  );
+  return r.rows[0]?.credits ?? null;
+}
+
+export async function setCredits(email, value) {
+  const r = await pool.query(
+    `UPDATE users SET credits = GREATEST(0, $1) WHERE email = $2 RETURNING credits`,
+    [value, email]
+  );
+  return r.rows[0]?.credits ?? null;
 }
