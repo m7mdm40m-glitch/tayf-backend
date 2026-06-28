@@ -4,6 +4,7 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import Anthropic from "@anthropic-ai/sdk";
 import { fal } from "@fal-ai/client";
 import { getUser, createUser, addCredits, setCredits, updateUser, getUserByVerifyToken, addCreation, getCreations, deleteCreation, adminGetAllUsers, adminGetStats, adminDeleteUser } from "./store.js";
@@ -70,6 +71,8 @@ async function sendVerifyEmail(email, link) {
 
 const app = express();
 app.use(express.json());
+// Render يعمل خلف بروكسي — هذا ضروري حتى يقرأ rate-limit عنوان IP الحقيقي للمستخدم
+app.set("trust proxy", 1);
 const ALLOWED_ORIGINS = [
   "https://tayf.art",
   "https://www.tayf.art",
@@ -84,6 +87,27 @@ app.use(cors({
     }
   },
 }));
+
+// ============ حدود معدّل الطلبات (Rate Limiting) — حماية من السبام وهدر الفلوس ============
+// حدّ صارم لمحاولات تسجيل الدخول والتسجيل: يمنع تخمين كلمات السر وسبام الإيميلات.
+// 10 محاولات لكل IP خلال 15 دقيقة.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "TOO_MANY_ATTEMPTS" },
+});
+
+// حدّ على التحسين والتوليد: يمنع حرق رصيد Anthropic / fal.
+// 30 طلب لكل IP خلال 5 دقائق.
+const aiLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "TOO_MANY_REQUESTS" },
+});
 
 const VIDEO_ENDPOINTS = {
   "kling26": "fal-ai/kling-video/v2.6/pro/text-to-video",
@@ -130,7 +154,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.post("/api/signup", async (req, res) => {
+app.post("/api/signup", authLimiter, async (req, res) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: "MISSING_FIELDS" });
   const key = String(email).trim().toLowerCase();
@@ -158,7 +182,7 @@ app.get("/api/verify", async (req, res) => {
   res.send("تم تأكيد بريدك بنجاح ✓ — حصلت على تجربتك المجانية. يمكنك الآن تسجيل الدخول.");
 });
 
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", authLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: "MISSING_FIELDS" });
   const u = await getUser(String(email).trim().toLowerCase());
@@ -198,7 +222,7 @@ app.post("/api/profile", auth, async (req, res) => {
   res.json({ token: sign(updated), user: publicUser(updated) });
 });
 
-app.post("/api/enhance", async (req, res) => {
+app.post("/api/enhance", auth, aiLimiter, async (req, res) => {
   const { prompt, mode = "image", styleEn = "" } = req.body || {};
   if (!prompt) return res.status(400).json({ error: "NO_PROMPT" });
   const sys =
@@ -220,7 +244,7 @@ app.post("/api/enhance", async (req, res) => {
   }
 });
 
-app.post("/api/generate", auth, async (req, res) => {
+app.post("/api/generate", auth, aiLimiter, async (req, res) => {
   const { mode = "image", model = "veo3.1", prompt, promptRaw, promptEn, ratio = "9:16", duration = 5, count = 1 } = req.body || {};
   if (!prompt) return res.status(400).json({ error: "NO_PROMPT" });
 
