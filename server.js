@@ -189,8 +189,8 @@ const aiLimiter = rateLimit({
 const VIDEO_ENDPOINTS = {
   "kling26": "fal-ai/kling-video/v2.6/pro/text-to-video",
   "veo3.1": "fal-ai/veo3.1/text-to-video",
-  "kling3": "fal-ai/kling-video/v3.0/text-to-video",
-  "seedance2": "fal-ai/bytedance/seedance-v2/text-to-video",
+  "kling3": "fal-ai/kling-video/v3/pro/text-to-video",
+  "seedance2": "fal-ai/bytedance/seedance-2.0/text-to-video",
 };
 const IMAGE_ENDPOINT = "fal-ai/flux/dev";
 
